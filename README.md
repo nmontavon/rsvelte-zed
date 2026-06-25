@@ -4,17 +4,22 @@ A [Svelte](https://svelte.dev) extension for [Zed](https://zed.dev) backed by a
 **native Rust language server** built on the [rsvelte](https://github.com/baseballyama/rsvelte)
 toolchain — no Node, no wasm, no external CLI.
 
-The server (`server/`, crate `rsvelte-lsp`) links `rsvelte_lint` and
-`rsvelte_formatter` directly and exposes them over LSP:
+The server (`server/`, crate `rsvelte-lsp`) links `rsvelte_lint`,
+`rsvelte_formatter`, and `rsvelte_core`'s `svelte_check` directly and exposes
+them over LSP:
 
 - **Formatting** — `textDocument/formatting` via `rsvelte_formatter::format`
   (formats `.svelte` plus embedded JS/TS/CSS in-process through `oxc_formatter`).
 - **Linting** — push diagnostics via `rsvelte_lint` on open / change / save,
   honoring inline `eslint-disable` / `svelte-ignore` directives.
+- **Type-checking** (opt-in) — push TypeScript diagnostics via
+  `rsvelte_core::svelte_check` on save, backed by **tsgo** (Microsoft's native
+  Go TypeScript — *not* Node). See [Type-checking](#type-checking).
 
-Type-checking is out of scope (rsvelte exposes it only as the batch CLI
-[`@rsvelte/svelte-check`](https://www.npmjs.com/package/@rsvelte/svelte-check),
-not over LSP).
+Interactive TS features (go-to-definition, hover, completion) are still out of
+scope — those need a TypeScript *language service* over the svelte2tsx overlay,
+which rsvelte hasn't shipped as an LSP yet. This server does type-error
+diagnostics only.
 
 The extension downloads the prebuilt server binary for your platform from this
 repo's GitHub releases (pinned by `SERVER_TAG` in `src/rsvelte.rs`) — the same
@@ -79,6 +84,44 @@ pair. So you can fix both at the source:
 
 `"extends": ["none"]` flips the baseline so nothing runs unless you opt a rule
 in. Inline `eslint-disable` / `svelte-ignore` comments are also honored per-file.
+
+### Type-checking
+
+Off by default. When enabled, the server runs rsvelte's `svelte-check` over the
+workspace **on save** and pushes TypeScript diagnostics (merged with lint),
+backed by **tsgo** — Microsoft's native Go TypeScript, so still no Node runtime.
+
+```jsonc
+{
+  "lsp": {
+    "rsvelte-language-server": {
+      "settings": {
+        "typeCheck": {
+          "enable": true,
+          // Optional: subdirectory to check, for a monorepo where the Svelte
+          // app isn't at the workspace root.
+          "root": "frontend",
+          // Optional: explicit path to a tsgo binary. Otherwise resolved from
+          // node_modules/.bin or $PATH.
+          "tsgoPath": "/abs/path/to/tsgo"
+        }
+      }
+    }
+  }
+}
+```
+
+Requirements and caveats:
+
+- **You need a `tsgo` binary.** Easiest: `npm i -D @typescript/native-preview`
+  (ships a prebuilt native `tsgo`; running it needs no Node). The server finds
+  `node_modules/.bin/tsgo`, anything on `$PATH`, or `typeCheck.tsgoPath`. If none
+  is found, type-checking silently no-ops.
+- It materializes a **`.svelte-check/` overlay directory** in the checked
+  workspace — add it to your `.gitignore`.
+- Diagnostics update **on save**, not as-you-type (the checker reads from disk),
+  and it type-checks the whole workspace, so on very large projects expect a
+  short delay after saving.
 
 To route Svelte formatting through the server, set the formatter for the
 language (otherwise Zed's default `auto` formatter prefers Prettier):

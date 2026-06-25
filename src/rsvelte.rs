@@ -73,6 +73,22 @@ impl RsvelteExtension {
     }
 }
 
+/// Build the server's environment from settings: forward `typeCheck.tsgoPath`
+/// (accepted at the top level or nested under `rsvelte`) as `RSVELTE_TSGO_PATH`.
+fn tsgo_env(settings: Option<&serde_json::Value>) -> Vec<(String, String)> {
+    let path = settings
+        .and_then(|v| {
+            let base = v.get("rsvelte").unwrap_or(v);
+            base.pointer("/typeCheck/tsgoPath").and_then(|p| p.as_str())
+        })
+        .filter(|p| !p.is_empty());
+
+    match path {
+        Some(p) => vec![("RSVELTE_TSGO_PATH".to_string(), p.to_string())],
+        None => Vec::new(),
+    }
+}
+
 /// Map Zed's platform/arch to the Rust target triple used in the release asset
 /// names. Windows is intentionally unsupported: the rsvelte toolchain pulls in
 /// jemalloc, which doesn't build on MSVC.
@@ -103,23 +119,28 @@ impl zed::Extension for RsvelteExtension {
         id: &LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<zed::Command> {
-        let binary = LspSettings::for_worktree(SERVER_NAME, worktree)
-            .ok()
-            .and_then(|s| s.binary);
+        let (binary, settings_json) = match LspSettings::for_worktree(SERVER_NAME, worktree).ok() {
+            Some(s) => (s.binary, s.settings),
+            None => (None, None),
+        };
+
+        // A `typeCheck.tsgoPath` setting is handed to the server as the
+        // RSVELTE_TSGO_PATH env var (the server forwards it to TSGO_BIN so
+        // svelte-check can find the native tsgo binary).
+        let mut env = tsgo_env(settings_json.as_ref());
 
         // An explicit binary path override skips the download entirely. This is
         // how you run a local build (or any custom server) — set, in settings:
         //   "lsp": { "rsvelte-language-server": { "binary": { "path": "…" } } }
         if let Some(bin) = &binary {
             if let Some(path) = &bin.path {
+                if let Some(bin_env) = &bin.env {
+                    env.extend(bin_env.clone());
+                }
                 return Ok(zed::Command {
                     command: path.clone(),
                     args: bin.arguments.clone().unwrap_or_default(),
-                    env: bin
-                        .env
-                        .clone()
-                        .map(|m| m.into_iter().collect())
-                        .unwrap_or_default(),
+                    env,
                 });
             }
         }
@@ -129,7 +150,7 @@ impl zed::Extension for RsvelteExtension {
         Ok(zed::Command {
             command: binary_path,
             args: binary.and_then(|b| b.arguments).unwrap_or_default(),
-            env: Default::default(),
+            env,
         })
     }
 
