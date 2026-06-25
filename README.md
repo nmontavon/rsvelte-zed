@@ -103,7 +103,13 @@ backed by **tsgo** — Microsoft's native Go TypeScript, so still no Node runtim
           "root": "frontend",
           // Optional: explicit path to a tsgo binary. Otherwise resolved from
           // node_modules/.bin or $PATH.
-          "tsgoPath": "/abs/path/to/tsgo"
+          "tsgoPath": "/abs/path/to/tsgo",
+          // Optional: coalescing window before a triggered check runs (default 300).
+          "debounceMs": 300,
+          // Optional: when to (re)run. Default ["save", "open"] — re-check on
+          // save and when a document is opened. There is no "change": the
+          // checker reads from disk, so it can only reflect saved content.
+          "runOn": ["save", "open"]
         }
       }
     }
@@ -122,6 +128,15 @@ Requirements and caveats:
 - Diagnostics update **on save**, not as-you-type (the checker reads from disk),
   and it type-checks the whole workspace, so on very large projects expect a
   short delay after saving.
+
+#### Scope: per-file lint vs whole-workspace type-check
+
+- **Lint** runs on the **single changed file**, on every change — live and cheap.
+- **Type-check** runs over the **whole workspace** (necessarily — TS types are
+  cross-file, so editing one component can change errors in another). The
+  svelte2tsx overlay step is incremental (unchanged files are cached), but the
+  tsgo pass loads the full program. This is why type diagnostics are on-save and
+  can update many files at once.
 
 To route Svelte formatting through the server, set the formatter for the
 language (otherwise Zed's default `auto` formatter prefers Prettier):

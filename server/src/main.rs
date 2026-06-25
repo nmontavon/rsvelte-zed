@@ -53,6 +53,12 @@ struct Settings {
     /// Optional workspace subdirectory to type-check (e.g. `"frontend"` in a
     /// monorepo). Relative paths resolve against the LSP root.
     type_check_root: Option<String>,
+    /// Coalescing window before a triggered type-check actually runs.
+    type_check_debounce_ms: u64,
+    /// Re-run the type-check on save.
+    type_check_on_save: bool,
+    /// Re-run the type-check when a document is opened.
+    type_check_on_open: bool,
 }
 
 impl Default for Settings {
@@ -65,6 +71,9 @@ impl Default for Settings {
             // `.svelte-check/` overlay dir in the workspace, so it's opt-in.
             type_check: false,
             type_check_root: None,
+            type_check_debounce_ms: 300,
+            type_check_on_save: true,
+            type_check_on_open: true,
         }
     }
 }
@@ -90,6 +99,15 @@ impl Settings {
             .pointer("/typeCheck/root")
             .and_then(|v| v.as_str())
             .map(str::to_string);
+        if let Some(n) = scope.pointer("/typeCheck/debounceMs").and_then(|v| v.as_u64()) {
+            s.type_check_debounce_ms = n;
+        }
+        // `runOn` is a list of triggers, e.g. ["save", "open"]. Absent → save + open.
+        if let Some(arr) = scope.pointer("/typeCheck/runOn").and_then(|v| v.as_array()) {
+            let has = |k: &str| arr.iter().any(|v| v.as_str() == Some(k));
+            s.type_check_on_save = has("save");
+            s.type_check_on_open = has("open");
+        }
         // The `lint` object doubles as a lint-config document: rsvelte's config
         // parser reads its `extends` / `rules` / `files` / `ignores` keys (and
         // ignores `enable`). This is what lets a user reconfigure individual
@@ -182,7 +200,7 @@ fn main_loop(
             (true, Some(ws)) => {
                 let (req_tx, req_rx) = crossbeam_channel::unbounded::<()>();
                 let (res_tx, res_rx) = crossbeam_channel::unbounded::<TypeResults>();
-                spawn_type_check_worker(ws, req_rx, res_tx);
+                spawn_type_check_worker(ws, settings.type_check_debounce_ms, req_rx, res_tx);
                 // Kick off an initial check so diagnostics appear without an edit.
                 let _ = req_tx.send(());
                 (Some(req_tx), Some(res_rx))
@@ -260,6 +278,11 @@ fn handle_message(
                 let uri = p.text_document.uri;
                 docs.insert(uri.clone(), p.text_document.text);
                 update_lint(connection, &uri, &docs[&uri], lint_diags, type_diags, settings);
+                if settings.type_check_on_open {
+                    if let Some(trigger) = trigger {
+                        let _ = trigger.send(());
+                    }
+                }
             }
             DidChangeTextDocument::METHOD => {
                 let mut p = cast_not::<DidChangeTextDocument>(not)?;
@@ -274,9 +297,11 @@ fn handle_message(
                 if let Some(text) = docs.get(&p.text_document.uri) {
                     update_lint(connection, &p.text_document.uri, text, lint_diags, type_diags, settings);
                 }
-                // Type-checking reads from disk, so it only makes sense on save.
-                if let Some(trigger) = trigger {
-                    let _ = trigger.send(());
+                // Type-checking reads from disk, so save is its natural trigger.
+                if settings.type_check_on_save {
+                    if let Some(trigger) = trigger {
+                        let _ = trigger.send(());
+                    }
                 }
             }
             DidCloseTextDocument::METHOD => {
@@ -401,11 +426,16 @@ fn compute_lint(text: &str, path: &Path, config: &LintConfig) -> Vec<Diagnostic>
 /// triggers, run a whole-workspace type-check via tsgo, and send back per-file
 /// LSP diagnostics. Runs serially, so saves while a check is in flight queue up
 /// and collapse into one follow-up run.
-fn spawn_type_check_worker(workspace: PathBuf, req_rx: Receiver<()>, res_tx: Sender<TypeResults>) {
+fn spawn_type_check_worker(
+    workspace: PathBuf,
+    debounce_ms: u64,
+    req_rx: Receiver<()>,
+    res_tx: Sender<TypeResults>,
+) {
     std::thread::spawn(move || {
         while req_rx.recv().is_ok() {
             // Debounce a burst of saves, then drain anything else queued.
-            std::thread::sleep(Duration::from_millis(300));
+            std::thread::sleep(Duration::from_millis(debounce_ms));
             while req_rx.try_recv().is_ok() {}
 
             let result = catch_unwind(AssertUnwindSafe(|| run_type_check(&workspace)));
