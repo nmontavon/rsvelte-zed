@@ -32,15 +32,20 @@ use rsvelte_lint::LintConfig;
 use rsvelte_lint::runner::lint_source;
 
 /// Effective `rsvelte.*` settings, resolved once from `initializationOptions`.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Settings {
     format: bool,
     lint: bool,
+    lint_config: LintConfig,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { format: true, lint: true }
+        Self {
+            format: true,
+            lint: true,
+            lint_config: LintConfig::recommended(),
+        }
     }
 }
 
@@ -57,6 +62,18 @@ impl Settings {
         }
         if let Some(b) = scope.pointer("/lint/enable").and_then(|v| v.as_bool()) {
             s.lint = b;
+        }
+        // The `lint` object doubles as a lint-config document: rsvelte's config
+        // parser reads its `extends` / `rules` / `files` / `ignores` keys (and
+        // ignores `enable`). This is what lets a user reconfigure individual
+        // rules — e.g. turn off `svelte/no-unused-class-name` for a Tailwind
+        // project, or allow TS via `"svelte/block-lang": ["error", {"script": "ts"}]`.
+        if let Some(lint) = scope.get("lint") {
+            if let Ok(text) = serde_json::to_string(lint) {
+                if let Ok(cfg) = LintConfig::from_json_str(&text) {
+                    s.lint_config = cfg;
+                }
+            }
         }
         s
     }
@@ -79,7 +96,7 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     let init: InitializeParams = serde_json::from_value(init_value)?;
     let settings = Settings::from_options(&init.initialization_options);
 
-    main_loop(&connection, settings)?;
+    main_loop(&connection, &settings)?;
     io_threads.join()?;
     eprintln!("rsvelte-lsp stopped");
     Ok(())
@@ -87,7 +104,7 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
 
 fn main_loop(
     connection: &Connection,
-    settings: Settings,
+    settings: &Settings,
 ) -> Result<(), Box<dyn Error + Sync + Send>> {
     // Full-sync server: we hold the latest text of every open document.
     let mut docs: HashMap<Url, String> = HashMap::new();
@@ -173,7 +190,7 @@ fn uri_to_path(uri: &Url) -> PathBuf {
 fn handle_formatting(
     docs: &HashMap<Url, String>,
     params: &DocumentFormattingParams,
-    settings: Settings,
+    settings: &Settings,
 ) -> serde_json::Value {
     if !settings.format {
         return serde_json::Value::Null;
@@ -193,9 +210,9 @@ fn handle_formatting(
     }
 }
 
-fn publish(connection: &Connection, uri: &Url, text: &str, settings: Settings) {
+fn publish(connection: &Connection, uri: &Url, text: &str, settings: &Settings) {
     let diagnostics = if settings.lint {
-        compute_diagnostics(text, &uri_to_path(uri))
+        compute_diagnostics(text, &uri_to_path(uri), &settings.lint_config)
     } else {
         Vec::new()
     };
@@ -214,12 +231,11 @@ fn publish_diagnostics(connection: &Connection, uri: &Url, diagnostics: Vec<Diag
     }));
 }
 
-fn compute_diagnostics(text: &str, path: &Path) -> Vec<Diagnostic> {
-    let config = LintConfig::recommended();
+fn compute_diagnostics(text: &str, path: &Path, config: &LintConfig) -> Vec<Diagnostic> {
     let options = CompileOptions::default();
     // rsvelte's lint pass parses + analyzes; guard against a panic on input the
     // parser can't handle so a single bad keystroke doesn't crash the session.
-    let result = catch_unwind(AssertUnwindSafe(|| lint_source(text, path, &options, &config)));
+    let result = catch_unwind(AssertUnwindSafe(|| lint_source(text, path, &options, config)));
     match result {
         Ok(diags) => diags.iter().map(to_lsp_diagnostic).collect(),
         Err(_) => Vec::new(),

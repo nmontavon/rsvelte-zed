@@ -43,6 +43,43 @@ the server as `initializationOptions`):
 }
 ```
 
+### Configuring lint rules
+
+By default the linter runs rsvelte's `recommended` preset — **every** rule at its
+default severity. Two of those rules are noisy for a typical TypeScript +
+Tailwind SvelteKit project: `svelte/block-lang` wants `<script lang="ts">` to drop
+its `lang` attribute, and `svelte/no-unused-class-name` flags every Tailwind
+utility class (it has no Tailwind awareness — it only matches classes against a
+local `<style>` block).
+
+The `lint` object doubles as a lint-config document: its `extends` / `rules` /
+`files` / `ignores` keys follow the same shape as a `rsvelte-lint.json`. A rule
+value is a severity (`"off"` / `"warn"` / `"error"`) or a `[severity, options]`
+pair. So you can fix both at the source:
+
+```jsonc
+{
+  "lsp": {
+    "rsvelte-language-server": {
+      "settings": {
+        "lint": {
+          "enable": true,
+          "rules": {
+            // Tailwind: classes live in the framework, not a <style> block.
+            "svelte/no-unused-class-name": "off",
+            // Allow (in fact require) lang="ts" on <script>.
+            "svelte/block-lang": ["error", { "script": "ts" }]
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+`"extends": ["none"]` flips the baseline so nothing runs unless you opt a rule
+in. Inline `eslint-disable` / `svelte-ignore` comments are also honored per-file.
+
 To route Svelte formatting through the server, set the formatter for the
 language (otherwise Zed's default `auto` formatter prefers Prettier):
 
