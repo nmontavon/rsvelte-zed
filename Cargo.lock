@@ -760,8 +760,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "zed_svelte"
-version = "0.2.11"
+name = "zed_rsvelte"
+version = "0.0.1"
 dependencies = [
  "zed_extension_api",
 ]
