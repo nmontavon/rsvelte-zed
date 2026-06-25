@@ -1,102 +1,146 @@
-use std::{collections::HashSet, env, path::PathBuf};
+use std::fs;
 use zed_extension_api::{
-    self as zed, serde_json, settings::LspSettings, LanguageServerId, Result,
+    self as zed, serde_json, settings::LspSettings, Architecture, DownloadedFileType,
+    LanguageServerId, Os, Result,
 };
 
 struct RsvelteExtension {
-    installed: HashSet<String>,
+    cached_binary_path: Option<String>,
 }
 
 const SERVER_NAME: &str = "rsvelte-language-server";
-const PACKAGE_NAME: &str = "@rsvelte/language-server";
-const SERVER_ENTRY: &str = "dist/server.mjs";
 
-fn get_package_path(package_name: &str) -> Result<PathBuf> {
-    let path = env::current_dir()
-        .map_err(|e| e.to_string())?
-        .join("node_modules")
-        .join(package_name);
-    Ok(path)
-}
+// The native `rsvelte-lsp` binary is published as a GitHub release on this repo.
+// Pin the tag so a given extension build always pulls a known-good server; bump
+// both together when releasing a new server.
+const RELEASE_REPO: &str = "nmontavon/rsvelte-zed";
+const SERVER_TAG: &str = "v0.1.0";
 
 impl RsvelteExtension {
-    fn install_package_if_needed(
-        &mut self,
-        id: &LanguageServerId,
-        package_name: &str,
-    ) -> Result<()> {
-        let installed_version = zed::npm_package_installed_version(package_name)?;
-
-        // If package is already installed in this session, then we won't reinstall it
-        if installed_version.is_some() && self.installed.contains(package_name) {
-            return Ok(());
+    /// Resolve the rsvelte-lsp binary, downloading the platform-appropriate
+    /// release asset on first use and caching it across the session.
+    fn language_server_binary_path(&mut self, id: &LanguageServerId) -> Result<String> {
+        if let Some(path) = &self.cached_binary_path {
+            if fs::metadata(path).is_ok_and(|m| m.is_file()) {
+                return Ok(path.clone());
+            }
         }
 
-        zed::set_language_server_installation_status(
-            id,
-            &zed::LanguageServerInstallationStatus::CheckingForUpdate,
-        );
+        let (platform, arch) = zed::current_platform();
+        let target = release_target(platform, arch)?;
 
-        let latest_version = zed::npm_package_latest_version(package_name)?;
+        // Versioned install dir so a tag bump triggers a fresh download and old
+        // versions can be garbage-collected below.
+        let version_dir = format!("rsvelte-lsp-{SERVER_TAG}");
+        let binary_path = format!("{version_dir}/rsvelte-lsp");
 
-        if installed_version.as_ref() != Some(&latest_version) {
-            println!("Installing {package_name}@{latest_version}...");
-
+        if !fs::metadata(&binary_path).is_ok_and(|m| m.is_file()) {
             zed::set_language_server_installation_status(
                 id,
                 &zed::LanguageServerInstallationStatus::Downloading,
             );
 
-            if let Err(error) = zed::npm_install_package(package_name, &latest_version) {
-                // If installation failed, we don't want to error but rather reuse existing version
-                if installed_version.is_none() {
-                    Err(error)?;
+            let release = zed::github_release_by_tag_name(RELEASE_REPO, SERVER_TAG)?;
+            let asset_name = format!("rsvelte-lsp-{target}.tar.gz");
+            let asset = release
+                .assets
+                .iter()
+                .find(|a| a.name == asset_name)
+                .ok_or_else(|| format!("no release asset named `{asset_name}` on {SERVER_TAG}"))?;
+
+            zed::download_file(
+                &asset.download_url,
+                &version_dir,
+                DownloadedFileType::GzipTar,
+            )
+            .map_err(|e| format!("failed to download {asset_name}: {e}"))?;
+
+            zed::make_file_executable(&binary_path)?;
+
+            // Drop any previously-downloaded versions.
+            if let Ok(entries) = fs::read_dir(".") {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with("rsvelte-lsp-") && name != version_dir {
+                        fs::remove_dir_all(entry.path()).ok();
+                    }
                 }
             }
-        } else {
-            println!("Found {package_name}@{latest_version} installed");
         }
 
-        self.installed.insert(package_name.into());
-        Ok(())
+        self.cached_binary_path = Some(binary_path.clone());
+        Ok(binary_path)
     }
+}
+
+/// Map Zed's platform/arch to the Rust target triple used in the release asset
+/// names. Windows is intentionally unsupported: the rsvelte toolchain pulls in
+/// jemalloc, which doesn't build on MSVC.
+fn release_target(platform: Os, arch: Architecture) -> Result<&'static str> {
+    Ok(match (platform, arch) {
+        (Os::Mac, Architecture::Aarch64) => "aarch64-apple-darwin",
+        (Os::Mac, Architecture::X8664) => "x86_64-apple-darwin",
+        (Os::Linux, Architecture::X8664) => "x86_64-unknown-linux-gnu",
+        (Os::Linux, Architecture::Aarch64) => "aarch64-unknown-linux-gnu",
+        (Os::Windows, _) => {
+            return Err("rsvelte-lsp does not provide Windows binaries yet".into());
+        }
+        (_, arch) => {
+            return Err(format!("unsupported architecture: {arch:?}"));
+        }
+    })
 }
 
 impl zed::Extension for RsvelteExtension {
     fn new() -> Self {
         Self {
-            installed: HashSet::new(),
+            cached_binary_path: None,
         }
     }
 
     fn language_server_command(
         &mut self,
         id: &LanguageServerId,
-        _: &zed::Worktree,
+        worktree: &zed::Worktree,
     ) -> Result<zed::Command> {
-        self.install_package_if_needed(id, PACKAGE_NAME)?;
+        let binary = LspSettings::for_worktree(SERVER_NAME, worktree)
+            .ok()
+            .and_then(|s| s.binary);
 
-        let path = get_package_path(PACKAGE_NAME)?
-            .join(SERVER_ENTRY)
-            .to_string_lossy()
-            .to_string();
+        // An explicit binary path override skips the download entirely. This is
+        // how you run a local build (or any custom server) — set, in settings:
+        //   "lsp": { "rsvelte-language-server": { "binary": { "path": "…" } } }
+        if let Some(bin) = &binary {
+            if let Some(path) = &bin.path {
+                return Ok(zed::Command {
+                    command: path.clone(),
+                    args: bin.arguments.clone().unwrap_or_default(),
+                    env: bin
+                        .env
+                        .clone()
+                        .map(|m| m.into_iter().collect())
+                        .unwrap_or_default(),
+                });
+            }
+        }
 
+        // Otherwise download the pinned release binary for this platform.
+        let binary_path = self.language_server_binary_path(id)?;
         Ok(zed::Command {
-            command: zed::node_binary_path()?,
-            args: vec![path, "--stdio".to_string()],
+            command: binary_path,
+            args: binary.and_then(|b| b.arguments).unwrap_or_default(),
             env: Default::default(),
         })
     }
 
-    fn language_server_workspace_configuration(
+    fn language_server_initialization_options(
         &mut self,
         _: &LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<Option<serde_json::Value>> {
-        // The server reads `rsvelte.*` (format.enable, lint.enable, rsvelteFmtPath)
-        // over `workspace/configuration`. Forward whatever the user put under
-        // `lsp.rsvelte-language-server.settings` in their Zed settings, defaulting
-        // to formatting + linting enabled.
+        // The native server reads its `rsvelte.*` config (format.enable,
+        // lint.enable) from initializationOptions. Forward whatever the user set
+        // under `lsp.rsvelte-language-server.settings`, defaulting to both on.
         let settings = LspSettings::for_worktree(SERVER_NAME, worktree)
             .ok()
             .and_then(|s| s.settings)

@@ -1,0 +1,65 @@
+name: Release rsvelte-lsp
+
+# Builds the native LSP server for every supported platform and attaches the
+# binaries to the GitHub release for the pushed tag. The Zed extension downloads
+# these assets at runtime (see src/rsvelte.rs, SERVER_TAG).
+#
+# To cut a release: bump `version` in server/Cargo.toml + SERVER_TAG in
+# src/rsvelte.rs, then push a matching tag, e.g. `git tag v0.1.0 && git push --tags`.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach binaries to (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-14 }
+          - { target: x86_64-apple-darwin, os: macos-13 }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+
+      # Clone the rsvelte source (pinned rev, no submodules) for the path deps.
+      - name: Vendor rsvelte
+        run: bash server/scripts/vendor-rsvelte.sh
+
+      # Host == target on every runner above, so a plain host build produces the
+      # right triple — no cross-compilation (which jemalloc dislikes).
+      - name: Build
+        run: cargo build --release --manifest-path server/Cargo.toml
+
+      - name: Package
+        shell: bash
+        run: |
+          tar -czf "rsvelte-lsp-${{ matrix.target }}.tar.gz" \
+            -C server/target/release rsvelte-lsp
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: rsvelte-lsp-${{ matrix.target }}.tar.gz

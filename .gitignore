@@ -10,3 +10,11 @@
 
 /target
 grammars/
+
+#
+# Native LSP server (server/)
+#
+
+/server/target
+# Vendored rsvelte source tree (cloned at a pinned rev by vendor-rsvelte.sh).
+/server/.rsvelte

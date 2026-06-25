@@ -1,0 +1,76 @@
+[package]
+name = "rsvelte-lsp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+description = "Native LSP server for Svelte, backed by the rsvelte Rust toolchain (formatter + linter)"
+publish = false
+
+[[bin]]
+name = "rsvelte-lsp"
+path = "src/main.rs"
+
+# This crate is its own workspace root, fully isolated from the wasm extension
+# crate at the repo root. The `[patch]` below only takes effect from a workspace
+# root, which is why this must be declared here.
+#
+# Exclude the vendored rsvelte checkout: without this, cargo auto-adopts the
+# path-dep crates (which live under this workspace dir) as members, and their
+# `[lints] workspace = true` then resolves against THIS manifest instead of
+# rsvelte's own workspace — which defines no `[workspace.lints]`. Excluding it
+# lets each rsvelte crate resolve its lints against `.rsvelte/Cargo.toml`.
+[workspace]
+exclude = [".rsvelte"]
+
+[dependencies]
+# rsvelte library crates, consumed as PATH deps against a local checkout under
+# `.rsvelte/` (cloned at a pinned rev by `scripts/vendor-rsvelte.sh` and in CI).
+#
+# Why path and not git: cargo recursively fetches *all* submodules of a git
+# dependency, and rsvelte has SSH/private submodules (`vize`, `corsa-bind`) that
+# can't be cloned anonymously. None of these three crates actually depend on
+# them, so we clone rsvelte WITHOUT submodules and point at it by path — cargo
+# never touches a path dep's submodules.
+rsvelte_core = { path = ".rsvelte/crates/rsvelte_core", default-features = false, features = ["native"] }
+rsvelte_lint = { path = ".rsvelte/crates/rsvelte_lint", default-features = false, features = ["native"] }
+rsvelte_formatter = { path = ".rsvelte/crates/rsvelte_formatter", default-features = false, features = ["native"] }
+
+# Minimal, synchronous LSP stack (rust-analyzer's transport crate + the schema).
+# lsp-server is transport-only and has no dependency on lsp-types, so the two
+# versions are chosen independently. lsp-types is pinned to 0.94 to keep the
+# `Url`-based document-uri API (0.95+ switched to a custom `Uri` type).
+lsp-server = "0.7"
+lsp-types = "=0.94.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# rsvelte's oxc dependencies are pulled from a single pinned git rev; replicate
+# the upstream workspace `[patch]` so every published `oxc_*` crate redirects to
+# that same rev. Without this, `oxc_formatter` (git-only) and the published
+# `oxc_parser`/`oxc_ast`/... would produce incompatible duplicate AST types.
+[patch.crates-io]
+oxc_allocator         = { git = "https://github.com/oxc-project/oxc", rev = "7537c582e090181244450aa4a9797c4264a84180" }
+oxc_parser            = { git = "https://github.com/oxc-project/oxc", rev = "7537c582e090181244450aa4a9797c4264a84180" }
+oxc_ast               = { git = "https://github.com/oxc-project/oxc", rev = "7537c582e090181244450aa4a9797c4264a84180" }
+oxc_ast_macros        = { git = "https://github.com/oxc-project/oxc", rev = "7537c582e090181244450aa4a9797c4264a84180" }
+oxc_ast_visit         = { git = "https://github.com/oxc-project/oxc", rev = "7537c582e090181244450aa4a9797c4264a84180" }
+oxc_span              = { git = "https://github.com/oxc-project/oxc", rev = "7537c582e090181244450aa4a9797c4264a84180" }
+oxc_diagnostics       = { git = "https://github.com/oxc-project/oxc", rev = "7537c582e090181244450aa4a9797c4264a84180" }
+oxc_codegen           = { git = "https://github.com/oxc-project/oxc", rev = "7537c582e090181244450aa4a9797c4264a84180" }
+oxc_syntax            = { git = "https://github.com/oxc-project/oxc", rev = "7537c582e090181244450aa4a9797c4264a84180" }
+oxc_semantic          = { git = "https://github.com/oxc-project/oxc", rev = "7537c582e090181244450aa4a9797c4264a84180" }
+oxc_regular_expression = { git = "https://github.com/oxc-project/oxc", rev = "7537c582e090181244450aa4a9797c4264a84180" }
+oxc_ecmascript        = { git = "https://github.com/oxc-project/oxc", rev = "7537c582e090181244450aa4a9797c4264a84180" }
+oxc_estree            = { git = "https://github.com/oxc-project/oxc", rev = "7537c582e090181244450aa4a9797c4264a84180" }
+oxc_str               = { git = "https://github.com/oxc-project/oxc", rev = "7537c582e090181244450aa4a9797c4264a84180" }
+oxc_data_structures   = { git = "https://github.com/oxc-project/oxc", rev = "7537c582e090181244450aa4a9797c4264a84180" }
+
+# Note: panic strategy left at the default `unwind` (not `abort`) so the server
+# can `catch_unwind` around a single lint/format call — one malformed buffer must
+# not take down the whole language server.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = true

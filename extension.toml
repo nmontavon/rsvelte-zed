@@ -1,7 +1,7 @@
 id = "rsvelte"
 name = "rsvelte"
-description = "Svelte support powered by the rsvelte language server (Rust formatter + linter)"
-version = "0.0.1"
+description = "Svelte support powered by the native rsvelte language server (Rust formatter + linter)"
+version = "0.1.0"
 schema_version = 1
 authors = ["Nicolas Montavon <nicolas.montavon@lybs.eu>"]
 repository = "https://github.com/nmontavon/rsvelte-zed"

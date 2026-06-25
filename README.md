@@ -1,58 +1,34 @@
 # Zed rsvelte
 
-A [Svelte](https://svelte.dev) extension for [Zed](https://zed.dev) that uses the
-[`@rsvelte/language-server`](https://github.com/baseballyama/rsvelte/tree/main/apps/npm/language-server) —
-the Rust port of the Svelte toolchain — instead of the official
-`svelte-language-server`.
+A [Svelte](https://svelte.dev) extension for [Zed](https://zed.dev) backed by a
+**native Rust language server** built on the [rsvelte](https://github.com/baseballyama/rsvelte)
+toolchain — no Node, no wasm, no external CLI.
 
-It provides:
+The server (`server/`, crate `rsvelte-lsp`) links `rsvelte_lint` and
+`rsvelte_formatter` directly and exposes them over LSP:
 
-- **Linting** via the `rsvelte_lint` engine, which is compiled to wasm and
-  bundled inside the language server package — **works out of the box, no extra
-  install.**
-- **Formatting** via `rsvelte-fmt`, a **separate native binary** that the server
-  shells out to (it formats `.svelte` and delegates embedded JS/TS/CSS to
-  `oxfmt`). It is *not* bundled, so you must install it yourself — see
-  [Formatting setup](#formatting-setup) below. If the binary isn't found,
-  formatting is silently disabled (linting still works).
+- **Formatting** — `textDocument/formatting` via `rsvelte_formatter::format`
+  (formats `.svelte` plus embedded JS/TS/CSS in-process through `oxc_formatter`).
+- **Linting** — push diagnostics via `rsvelte_lint` on open / change / save,
+  honoring inline `eslint-disable` / `svelte-ignore` directives.
 
-Type-checking is intentionally out of scope (use
-[`@rsvelte/svelte-check`](https://www.npmjs.com/package/@rsvelte/svelte-check) as a batch checker).
+Type-checking is out of scope (rsvelte exposes it only as the batch CLI
+[`@rsvelte/svelte-check`](https://www.npmjs.com/package/@rsvelte/svelte-check),
+not over LSP).
 
-## Formatting setup
+The extension downloads the prebuilt server binary for your platform from this
+repo's GitHub releases (pinned by `SERVER_TAG` in `src/rsvelte.rs`) — the same
+model as the `rust-analyzer` / `gopls` extensions.
 
-The language server resolves the `rsvelte-fmt` binary in this order:
+## Supported platforms
 
-1. The explicit `rsvelteFmtPath` setting (see below), if set.
-2. Your project's `node_modules/.bin/rsvelte-fmt`.
-
-Pick one:
-
-- **Per project (recommended by upstream):** add the formatter as a dev
-  dependency so it lands in `node_modules/.bin`:
-
-  ```sh
-  npm i -D @rsvelte/fmt   # or: pnpm add -D @rsvelte/fmt
-  ```
-
-- **Global / shared binary:** install `@rsvelte/fmt` anywhere and point the
-  server at the binary explicitly via `rsvelteFmtPath` (no per-project install
-  needed). See the example in [Settings](#settings).
-
-Then tell Zed to route Svelte formatting through the language server (otherwise
-Zed's default `auto` formatter still prefers Prettier):
-
-```jsonc
-{
-  "languages": {
-    "Svelte": { "formatter": "language_server" }
-  }
-}
-```
+`aarch64`/`x86_64` macOS and Linux. Windows is not supported yet: the rsvelte
+toolchain pulls in jemalloc, which doesn't build on MSVC.
 
 ## Settings
 
-Configure the server from your Zed settings under `lsp.rsvelte-language-server.settings`:
+Configure the server under `lsp.rsvelte-language-server.settings` (forwarded to
+the server as `initializationOptions`):
 
 ```jsonc
 {
@@ -60,19 +36,68 @@ Configure the server from your Zed settings under `lsp.rsvelte-language-server.s
     "rsvelte-language-server": {
       "settings": {
         "format": { "enable": true },
-        "lint": { "enable": true },
-        "rsvelteFmtPath": "/abs/path/to/rsvelte-fmt" // optional; overrides node_modules resolution
+        "lint": { "enable": true }
       }
     }
   }
 }
 ```
 
-See [Formatting setup](#formatting-setup) for how `rsvelteFmtPath` fits in.
+To route Svelte formatting through the server, set the formatter for the
+language (otherwise Zed's default `auto` formatter prefers Prettier):
+
+```jsonc
+{ "languages": { "Svelte": { "formatter": "language_server" } } }
+```
 
 ## Development
 
-Install as a dev extension via `zed: install dev extension` and select this
-directory. See the [Developing Extensions](https://zed.dev/docs/extensions/developing-extensions)
-docs. Disable the official Svelte extension first, since both declare the `Svelte`
-language.
+### The extension (wasm)
+
+```sh
+cargo build --release --target wasm32-wasip1
+```
+
+Install via `zed: install dev extension` and select this directory. Disable the
+official Svelte extension first — both declare the `Svelte` language.
+
+### The native server (`server/`)
+
+```sh
+cd server
+./scripts/vendor-rsvelte.sh      # clone rsvelte at the pinned rev (no submodules)
+cargo build --release            # → server/target/release/rsvelte-lsp
+```
+
+The server is consumed as **path deps** against the cloned tree in
+`server/.rsvelte` (gitignored). Git deps don't work because cargo recursively
+fetches rsvelte's SSH/private submodules; we clone without submodules instead.
+
+To test the server against a dev extension build **without cutting a release**,
+point the extension at your local binary in your Zed settings — this overrides
+the download path:
+
+```jsonc
+{
+  "lsp": {
+    "rsvelte-language-server": {
+      "binary": {
+        "path": "/absolute/path/to/server/target/release/rsvelte-lsp"
+      }
+    }
+  }
+}
+```
+
+## Releasing the server
+
+Bump `version` in `server/Cargo.toml` and `SERVER_TAG` in `src/rsvelte.rs`, then
+push a matching tag:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+`.github/workflows/release-server.yml` builds all platform binaries and attaches
+`rsvelte-lsp-<target>.tar.gz` assets to the release. To rebuild for an existing
+tag, run the workflow manually with the tag as input.
